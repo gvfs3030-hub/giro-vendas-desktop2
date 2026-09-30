@@ -8,8 +8,9 @@ permissions:
 
 jobs:
   build:
+    name: Build Windows x64
+    runs-on: windows-2025
     timeout-minutes: 90
-    runs-on: windows-2025-vs2026
 
     steps:
       - name: Checkout
@@ -21,61 +22,139 @@ jobs:
           node-version: '22.11.0'
           check-latest: false
 
-      - name: Show toolchain
+      - name: Verify environment
         shell: pwsh
         run: |
+          Write-Host "Node:"
           node --version
+
+          Write-Host "npm:"
           npm --version
+
+          Write-Host "dotnet:"
           dotnet --version
-          where.exe msbuild
-          msbuild -version
 
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
-
-      - name: Patch react-native-fs
-        run: node tools/patch-rnfs.js
-
-      - name: Generate Windows project
-        run: npx react-native init-windows --template cpp-app --overwrite --no-telemetry --logging
-
-      - name: Prepare Windows assets
-        run: npm run prepare-windows-assets
-
-      - name: Autolink Windows dependencies
-        run: npx react-native autolink-windows --no-telemetry
-
-      - name: Build Windows ReleaseBundle
-        run: npm run windows
-
-      - name: Collect EXE
+      - name: Find MSBuild
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          $vswhere = Join-Path `
+            ${env:ProgramFiles(x86)} `
+            "Microsoft Visual Studio\Installer\vswhere.exe"
+
+          if (-not (Test-Path $vswhere)) {
+            throw "vswhere.exe não encontrado."
+          }
+
+          $msbuild = (
+            & $vswhere `
+              -latest `
+              -products * `
+              -requires Microsoft.Component.MSBuild `
+              -find "MSBuild\**\Bin\MSBuild.exe" |
+              Select-Object -First 1
+          ).Trim()
+
+          if (-not $msbuild) {
+            throw "MSBuild.exe não encontrado."
+          }
+
+          Write-Host "MSBuild encontrado:"
+          Write-Host $msbuild
+
+          $msbuildDir = Split-Path $msbuild -Parent
+
+          $msbuildDir | Out-File `
+            -FilePath $env:GITHUB_PATH `
+            -Encoding utf8 `
+            -Append
+
+          $env:PATH = "$msbuildDir;$env:PATH"
+
+          Write-Host "Versão do MSBuild:"
+          & $msbuild -version
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          npm install --no-audit --no-fund
+
+      - name: Patch react-native-fs
+        shell: pwsh
+        run: |
+          node tools/patch-rnfs.js
+
+      - name: Generate Windows project
+        shell: pwsh
+        run: |
+          npx react-native init-windows `
+            --template cpp-app `
+            --overwrite `
+            --no-telemetry `
+            --logging
+
+      - name: Prepare Windows assets
+        shell: pwsh
+        run: |
+          npm run prepare-windows-assets
+
+      - name: Autolink Windows
+        shell: pwsh
+        run: |
+          npx react-native autolink-windows `
+            --no-telemetry
+
+      - name: Build Windows ReleaseBundle
+        shell: pwsh
+        run: |
+          npm run windows
+
+      - name: Find executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Procurando GiroVendasDesktop.exe..."
 
           $exe = Get-ChildItem `
             -Path windows `
             -Recurse `
             -Filter "GiroVendasDesktop.exe" `
             -File |
-            Where-Object {
-              $_.FullName -match "\\x64\\ReleaseBundle\\"
-            } |
             Select-Object -First 1
 
           if (-not $exe) {
-            Write-Host "EXE não encontrado."
+            Write-Host ""
             Write-Host "Executáveis encontrados:"
-            Get-ChildItem windows -Recurse -Filter "*.exe" -File |
+
+            Get-ChildItem `
+              -Path windows `
+              -Recurse `
+              -Filter "*.exe" `
+              -File |
               Select-Object FullName |
               Format-Table -AutoSize
-            exit 1
+
+            throw "GiroVendasDesktop.exe não foi encontrado."
           }
 
-          $out = Join-Path $env:GITHUB_WORKSPACE "artifacts"
-          $portable = Join-Path $out "GiroVendasDesktop-Windows-x64"
+          Write-Host "EXE encontrado:"
+          Write-Host $exe.FullName
 
-          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+          $artifactRoot = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            "artifacts"
+
+          $portable = Join-Path `
+            $artifactRoot `
+            "GiroVendasDesktop-Windows-x64"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $portable |
+            Out-Null
 
           Copy-Item `
             -Path (Join-Path $exe.Directory.FullName "*") `
@@ -83,19 +162,23 @@ jobs:
             -Recurse `
             -Force
 
-          Set-Content `
-            -Path (Join-Path $portable "LEIA-ME.txt") `
-            -Value "Execute GiroVendasDesktop.exe. Mantenha os arquivos DLL e demais arquivos desta pasta."
+          $zipPath = Join-Path `
+            $artifactRoot `
+            "GiroVendasDesktop-Windows-x64.zip"
 
           Compress-Archive `
             -Path (Join-Path $portable "*") `
-            -DestinationPath (Join-Path $out "GiroVendasDesktop-Windows-x64.zip") `
+            -DestinationPath $zipPath `
             -Force
 
-      - name: Upload build
+          Write-Host ""
+          Write-Host "Build portátil criada:"
+          Write-Host $zipPath
+
+      - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
           name: GiroVendasDesktop-Windows-x64
-          path: artifacts/**
+          path: artifacts/GiroVendasDesktop-Windows-x64.zip
           if-no-files-found: error
           retention-days: 14
