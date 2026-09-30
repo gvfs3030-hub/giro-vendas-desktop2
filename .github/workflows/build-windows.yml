@@ -1,0 +1,101 @@
+name: Build Windows App
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    timeout-minutes: 90
+    runs-on: windows-2025-vs2026
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.11.0'
+          check-latest: false
+
+      - name: Show toolchain
+        shell: pwsh
+        run: |
+          node --version
+          npm --version
+          dotnet --version
+          where.exe msbuild
+          msbuild -version
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Patch react-native-fs
+        run: node tools/patch-rnfs.js
+
+      - name: Generate Windows project
+        run: npx react-native init-windows --template cpp-app --overwrite --no-telemetry --logging
+
+      - name: Prepare Windows assets
+        run: npm run prepare-windows-assets
+
+      - name: Autolink Windows dependencies
+        run: npx react-native autolink-windows --no-telemetry
+
+      - name: Build Windows ReleaseBundle
+        run: npm run windows
+
+      - name: Collect EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $exe = Get-ChildItem `
+            -Path windows `
+            -Recurse `
+            -Filter "GiroVendasDesktop.exe" `
+            -File |
+            Where-Object {
+              $_.FullName -match "\\x64\\ReleaseBundle\\"
+            } |
+            Select-Object -First 1
+
+          if (-not $exe) {
+            Write-Host "EXE não encontrado."
+            Write-Host "Executáveis encontrados:"
+            Get-ChildItem windows -Recurse -Filter "*.exe" -File |
+              Select-Object FullName |
+              Format-Table -AutoSize
+            exit 1
+          }
+
+          $out = Join-Path $env:GITHUB_WORKSPACE "artifacts"
+          $portable = Join-Path $out "GiroVendasDesktop-Windows-x64"
+
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+
+          Copy-Item `
+            -Path (Join-Path $exe.Directory.FullName "*") `
+            -Destination $portable `
+            -Recurse `
+            -Force
+
+          Set-Content `
+            -Path (Join-Path $portable "LEIA-ME.txt") `
+            -Value "Execute GiroVendasDesktop.exe. Mantenha os arquivos DLL e demais arquivos desta pasta."
+
+          Compress-Archive `
+            -Path (Join-Path $portable "*") `
+            -DestinationPath (Join-Path $out "GiroVendasDesktop-Windows-x64.zip") `
+            -Force
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: GiroVendasDesktop-Windows-x64
+          path: artifacts/**
+          if-no-files-found: error
+          retention-days: 14
